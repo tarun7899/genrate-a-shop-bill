@@ -145,6 +145,18 @@ const loadJsPDF = () => {
   return jsPDFLoadPromise;
 };
 
+const isMobileDevice = () => /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+
+const canSharePdfFile = (file) => {
+  if (typeof navigator === 'undefined' || !navigator.share) return false;
+  if (!navigator.canShare) return isMobileDevice();
+  try {
+    return navigator.canShare({ files: [file] });
+  } catch {
+    return false;
+  }
+};
+
 // Must run synchronously inside the click handler — browsers block navigation after await.
 const openWhatsAppChat = (url) => {
   const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
@@ -187,6 +199,11 @@ export default function PotteryShopBilling() {
   const [copied, setCopied] = useState(false);
   const [sentBanner, setSentBanner] = useState('');
   const [pdfBusy, setPdfBusy] = useState(false);
+  const [sharePrompt, setSharePrompt] = useState(null);
+
+  useEffect(() => {
+    loadJsPDF().catch(() => {});
+  }, []);
 
   useEffect(() => {
     let mounted = true;
@@ -432,37 +449,84 @@ export default function PotteryShopBilling() {
     }
   };
 
-  const handleSend = () => {
-    if (!canSend) return;
-
+  const buildWhatsAppMessage = () => {
     const shopLabel = shop.name.trim() || 'our shop';
     const namePart = customerName.trim() ? `Hi ${customerName.trim()}, ` : 'Hi, ';
-    const text = `${namePart}here's your bill ${displayBillNo} from ${shopLabel} — Total: ${currency}${fmt(total)}. Thank you for shopping with us! 🏺`;
-    const waUrl = `https://wa.me/${digitsPhone}?text=${encodeURIComponent(text)}`;
+    return `${namePart}here's your bill ${displayBillNo} from ${shopLabel} — Total: ${currency}${fmt(total)}. Thank you for shopping with us! 🏺`;
+  };
 
-    // Open WhatsApp immediately (before any await) so the browser allows it.
-    openWhatsAppChat(waUrl);
+  const shareBillPdf = async (file, fileName) => {
+    await navigator.share({
+      files: [file],
+      title: fileName.replace('.pdf', ''),
+    });
+  };
 
-    void (async () => {
-      setPdfBusy(true);
-      try {
-        const doc = await buildBillPDF();
-        const fileName = `Bill-${displayBillNo.replace('#', '')}.pdf`;
-        doc.save(fileName);
+  const handleSharePdfPrompt = async () => {
+    if (!sharePrompt?.file) return;
+    try {
+      await shareBillPdf(sharePrompt.file, sharePrompt.fileName);
+      await persistAfterSend();
+      setSharePrompt(null);
+      setSentBanner('Pick WhatsApp — the PDF bill is attached. Choose the customer chat and tap Send.');
+      setTimeout(() => setSentBanner(''), 12000);
+    } catch (e) {
+      if (e?.name === 'AbortError') return;
+      setSentBanner('Could not share the PDF. Open the app via HTTPS (Vercel link) or download the PDF and attach it manually.');
+      setTimeout(() => setSentBanner(''), 10000);
+    }
+  };
+
+  const handleSend = async () => {
+    if (!canSend) return;
+    setPdfBusy(true);
+    setSharePrompt(null);
+
+    try {
+      const doc = await buildBillPDF();
+      const fileName = `Bill-${displayBillNo.replace('#', '')}.pdf`;
+      const blob = doc.output('blob');
+      const file = new File([blob], fileName, { type: 'application/pdf' });
+      const text = buildWhatsAppMessage();
+      const mobile = isMobileDevice();
+      const secure = typeof window !== 'undefined' && window.isSecureContext;
+      const shareCapable = mobile && secure && (canSharePdfFile(file) || !!navigator.share);
+
+      if (shareCapable) {
         try {
-          await navigator.clipboard.writeText(text);
+          await shareBillPdf(file, fileName);
+          await persistAfterSend();
+          setSentBanner('Pick WhatsApp — the PDF bill is attached. Choose the customer chat and tap Send.');
+          setTimeout(() => setSentBanner(''), 12000);
+          return;
         } catch (e) {
-          // clipboard may be blocked
+          if (e?.name === 'AbortError') return;
+          // Browsers block share after async PDF build — show one more tap to share the file.
+          setSharePrompt({ file, fileName, text });
+          return;
         }
-        await persistAfterSend();
-        setSentBanner(`WhatsApp opened for ${customerPhone.trim()}. PDF saved as ${fileName} — tap 📎 in the chat, attach the PDF, then send.`);
-        setTimeout(() => setSentBanner(''), 12000);
-      } catch (e) {
-        setSentBanner('WhatsApp opened, but PDF could not be generated. Check your connection and tap PDF to retry.');
-        setTimeout(() => setSentBanner(''), 8000);
       }
+
+      if (mobile && !secure) {
+        doc.save(fileName);
+        setSharePrompt({ file, fileName, text, needsHttps: true });
+        setSentBanner('PDF saved. For one-tap PDF sharing on phone, open this app via your HTTPS Vercel link (not http://192.168...).');
+        setTimeout(() => setSentBanner(''), 14000);
+        return;
+      }
+
+      // Desktop: download PDF and open WhatsApp Web with the message.
+      doc.save(fileName);
+      openWhatsAppChat(`https://wa.me/${digitsPhone}?text=${encodeURIComponent(text)}`);
+      await persistAfterSend();
+      setSentBanner(`PDF saved as ${fileName}. WhatsApp opened — attach the PDF in the chat, then send.`);
+      setTimeout(() => setSentBanner(''), 12000);
+    } catch (e) {
+      setSentBanner('Could not generate the PDF. Check your connection and try again.');
+      setTimeout(() => setSentBanner(''), 8000);
+    } finally {
       setPdfBusy(false);
-    })();
+    }
   };
 
   const handleDownloadPDF = async () => {
@@ -778,6 +842,45 @@ export default function PotteryShopBilling() {
           </div>
         </div>
       </div>
+
+      {sharePrompt && (
+        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/40 p-4">
+          <div className="w-full max-w-sm rounded-2xl bg-white p-5 shadow-xl">
+            <h3 className="font-semibold text-stone-900 text-lg mb-1">PDF bill ready</h3>
+            {sharePrompt.needsHttps ? (
+              <p className="text-sm text-stone-600 mb-4">
+                PDF saved as <strong>{sharePrompt.fileName}</strong>. Open this app using your
+                {' '}<strong>HTTPS Vercel link</strong> to share the PDF directly on WhatsApp.
+                On local Wi‑Fi (http://192.168...) phones can only send text, not attach files.
+              </p>
+            ) : (
+              <p className="text-sm text-stone-600 mb-4">
+                Tap below, choose <strong>WhatsApp</strong>, pick the customer chat for{' '}
+                <strong>{customerPhone.trim()}</strong>, and send. The PDF will be attached — not plain text.
+              </p>
+            )}
+            <div className="flex flex-col gap-2">
+              {!sharePrompt.needsHttps && (
+                <button
+                  type="button"
+                  onClick={handleSharePdfPrompt}
+                  className="w-full flex items-center justify-center gap-2 px-4 py-3 rounded-xl bg-green-600 text-white font-semibold hover:bg-green-700 transition-colors"
+                >
+                  <MessageCircle className="w-5 h-5" />
+                  Share PDF on WhatsApp
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => setSharePrompt(null)}
+                className="w-full px-4 py-2 rounded-xl bg-stone-100 text-stone-600 font-medium hover:bg-stone-200 transition-colors"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
