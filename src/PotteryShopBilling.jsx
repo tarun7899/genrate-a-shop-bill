@@ -147,6 +147,18 @@ const loadJsPDF = () => {
 
 const isMobileDevice = () => /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
 
+const canSharePdfFile = (file, text = '') => {
+  if (typeof navigator === 'undefined' || !navigator.share) return false;
+  const payload = { files: [file] };
+  if (text) payload.text = text;
+  if (!navigator.canShare) return isMobileDevice();
+  try {
+    return navigator.canShare(payload);
+  } catch {
+    return false;
+  }
+};
+
 const downloadPdfFile = (file) => {
   const url = URL.createObjectURL(file);
   const link = document.createElement('a');
@@ -530,19 +542,69 @@ export default function PotteryShopBilling() {
     return data.url || null;
   };
 
+  const sendWhatsAppBillApi = async (file, caption) => {
+    const secure = typeof window !== 'undefined' && window.isSecureContext;
+    if (!secure) return { ok: false, reason: 'https' };
+
+    const pdfUrl = await uploadPdfAndGetUrl(file);
+    if (!pdfUrl) return { ok: false, reason: 'upload' };
+
+    const res = await fetch('/api/send-whatsapp', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        to: digitsPhone,
+        pdfUrl,
+        caption,
+        fileName: file.name,
+      }),
+    });
+
+    if (res.status === 503) return { ok: false, reason: 'not_configured' };
+    if (!res.ok) return { ok: false, reason: 'send_failed' };
+    return { ok: true };
+  };
+
+  const shareBillPdfToWhatsApp = async (file, text) => {
+    const withCaption = { files: [file] };
+    if (text) withCaption.text = text;
+
+    if (!navigator.canShare || navigator.canShare(withCaption)) {
+      await navigator.share(withCaption);
+      return;
+    }
+
+    await navigator.share({ files: [file] });
+  };
+
   const openCustomerWhatsApp = async (file, message, persist = false) => {
+    if (canSharePdfFile(file, message)) {
+      try {
+        await shareBillPdfToWhatsApp(file, message);
+        if (persist) await persistAfterSend();
+        return true;
+      } catch (e) {
+        if (e?.name === 'AbortError') throw e;
+      }
+    }
+
     downloadPdfFile(file);
     openWhatsAppChat(digitsPhone, message);
     if (persist) await persistAfterSend();
+    return false;
   };
 
   const handleSharePdfPrompt = async () => {
     if (!sharePrompt?.file) return;
     const { file, fileName, text, displayPhone: promptPhone } = sharePrompt;
-    await openCustomerWhatsApp(file, text || buildWhatsAppMessage(), true);
-    setSharePrompt(null);
-    setSentBanner(`WhatsApp opened for ${promptPhone || displayPhone}. Attach ${fileName}, then tap Send.`);
-    setTimeout(() => setSentBanner(''), 14000);
+    try {
+      await openCustomerWhatsApp(file, text || buildWhatsAppMessage(), true);
+      setSharePrompt(null);
+      setSentBanner(`Select WhatsApp, choose ${promptPhone || displayPhone}, then tap Send.`);
+      setTimeout(() => setSentBanner(''), 14000);
+    } catch (e) {
+      if (e?.name === 'AbortError') return;
+    }
   };
 
   const handleSend = async () => {
@@ -556,8 +618,31 @@ export default function PotteryShopBilling() {
       const text = buildWhatsAppMessage();
       const mobile = isMobileDevice();
 
-      // Mobile: open the customer's chat directly, save PDF to attach in WhatsApp.
       if (mobile) {
+        // 1. WhatsApp Cloud API — sends PDF + caption directly to the entered number.
+        const apiResult = await sendWhatsAppBillApi(file, text);
+        if (apiResult.ok) {
+          await persistAfterSend();
+          openWhatsAppChat(digitsPhone);
+          setSentBanner(`Bill PDF sent to ${displayPhone}. WhatsApp opened to view the chat.`);
+          setTimeout(() => setSentBanner(''), 14000);
+          return;
+        }
+
+        // 2. Share PDF file with caption (Bill-0006.pdf preview + message format).
+        if (navigator.share) {
+          try {
+            await shareBillPdfToWhatsApp(file, text);
+            await persistAfterSend();
+            setSentBanner(`Select WhatsApp, choose ${displayPhone}, then tap Send.`);
+            setTimeout(() => setSentBanner(''), 14000);
+            return;
+          } catch (e) {
+            if (e?.name === 'AbortError') return;
+          }
+        }
+
+        // 3. Direct chat + PDF saved to phone for manual attach.
         downloadPdfFile(file);
         openWhatsAppChat(digitsPhone, text);
         await persistAfterSend();
@@ -843,7 +928,7 @@ export default function PotteryShopBilling() {
             )}
             {canSend && isMobileDevice() && (
               <p className="text-xs text-stone-500 mb-2">
-                Opens WhatsApp for {displayPhone} with the bill message. Attach the downloaded PDF, then tap Send.
+                Sends PDF bill with message to {displayPhone}. Select WhatsApp, pick the customer, tap Send.
               </p>
             )}
 
@@ -922,7 +1007,7 @@ export default function PotteryShopBilling() {
                   Customer: <strong>{sharePrompt.displayPhone}</strong>
                 </p>
                 <p className="text-sm text-stone-600 mb-4">
-                  Tap below to open WhatsApp for this customer and download the PDF to attach.
+                  Tap below to open WhatsApp for this customer with the PDF bill attached.
                 </p>
               </>
             )}
@@ -934,16 +1019,19 @@ export default function PotteryShopBilling() {
                   className="w-full flex items-center justify-center gap-2 px-4 py-3 rounded-xl bg-green-600 text-white font-semibold hover:bg-green-700 transition-colors"
                 >
                   <MessageCircle className="w-5 h-5" />
-                  Open WhatsApp for {sharePrompt.displayPhone}
+                  Share PDF bill
                 </button>
               )}
               {!sharePrompt.needsHttps && sharePrompt.file && (
                 <button
                   type="button"
-                  onClick={() => downloadPdfFile(sharePrompt.file)}
+                  onClick={() => {
+                    downloadPdfFile(sharePrompt.file);
+                    openWhatsAppChat(digitsPhone, sharePrompt.text || buildWhatsAppMessage());
+                  }}
                   className="w-full px-4 py-2 rounded-xl bg-stone-100 text-stone-600 font-medium hover:bg-stone-200 transition-colors text-sm"
                 >
-                  Download {sharePrompt.fileName}
+                  Open chat for {sharePrompt.displayPhone}
                 </button>
               )}
               <button
