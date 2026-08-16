@@ -11,12 +11,15 @@
     "tunnel": "npx cloudflared tunnel --url http://localhost:4173"
   },
   "dependencies": {
+    "html2canvas": "^1.4.1",
+    "jspdf": "^4.2.1",
     "lucide-react": "^0.539.0",
     "react": "^19.1.1",
     "react-dom": "^19.1.1"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.1.12",
+    "@vitejs/plugin-basic-ssl": "^2.3.0",
     "@vitejs/plugin-react": "^5.0.0",
     "tailwindcss": "^4.1.12",
     "vite": "^7.1.2"

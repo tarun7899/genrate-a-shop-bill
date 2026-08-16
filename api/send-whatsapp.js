@@ -10,8 +10,8 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: 'Method not allowed' });
   }
 
-  const token = process.env.WHATSAPP_ACCESS_TOKEN;
-  const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
+  const token = req.body?.whatsappAccessToken || process.env.WHATSAPP_ACCESS_TOKEN;
+  const phoneNumberId = req.body?.whatsappPhoneNumberId || process.env.WHATSAPP_PHONE_NUMBER_ID;
   if (!token || !phoneNumberId) {
     return res.status(503).json({ error: 'WhatsApp API not configured', configured: false });
   }
