@@ -524,10 +524,7 @@ export default function PotteryShopBilling() {
   };
 
   const shareBillPdf = async (file, fileName, text) => {
-    const payload = {
-      files: [file],
-      title: fileName.replace('.pdf', ''),
-    };
+    const payload = { files: [file] };
     if (text) payload.text = text;
     await navigator.share(payload);
   };
@@ -538,7 +535,7 @@ export default function PotteryShopBilling() {
       await shareBillPdf(sharePrompt.file, sharePrompt.fileName, sharePrompt.text);
       await persistAfterSend();
       setSharePrompt(null);
-      setSentBanner(`PDF shared. If WhatsApp did not open for ${sharePrompt.displayPhone || displayPhone}, tap Open chat below.`);
+      setSentBanner(`Select WhatsApp → choose ${sharePrompt.displayPhone || displayPhone} → tap Send.`);
       setTimeout(() => setSentBanner(''), 14000);
     } catch (e) {
       if (e?.name === 'AbortError') return;
@@ -556,23 +553,41 @@ export default function PotteryShopBilling() {
       const file = await getPdfFile();
       const fileName = file.name;
       const text = buildWhatsAppMessage();
-      const secure = typeof window !== 'undefined' && window.isSecureContext;
       const mobile = isMobileDevice();
 
-      let message = text;
-      const pdfUrl = secure ? await uploadPdfAndGetUrl(file) : null;
-
-      if (pdfUrl) {
-        message = `${text}\n\n📄 Bill PDF:\n${pdfUrl}`;
-      } else {
-        message = buildBillText();
-        if (!secure && mobile) {
-          const doc = await buildBillPDF();
-          doc.save(fileName);
+      // Mobile: share the PDF file so WhatsApp shows it as a document + caption (not a link).
+      if (mobile && canSharePdfFile(file)) {
+        try {
+          await shareBillPdf(file, fileName, text);
+          await persistAfterSend();
+          setSentBanner(`Select WhatsApp → choose ${displayPhone} → tap Send.`);
+          setTimeout(() => setSentBanner(''), 14000);
+          return;
+        } catch (e) {
+          if (e?.name === 'AbortError') return;
+          setSharePrompt({ file, fileName, text, displayPhone, mode: 'share' });
+          return;
         }
       }
 
-      openWhatsAppChat(digitsPhone, message);
+      if (mobile) {
+        openWhatsAppChat(digitsPhone, buildBillText());
+        await persistAfterSend();
+        setSentBanner(`WhatsApp opened for ${displayPhone}. Attach the PDF using the paperclip if needed.`);
+        setTimeout(() => setSentBanner(''), 14000);
+        return;
+      }
+
+      // Desktop: WhatsApp Web only supports pre-filled text — include PDF link when upload works.
+      const secure = typeof window !== 'undefined' && window.isSecureContext;
+      const pdfUrl = secure ? await uploadPdfAndGetUrl(file) : null;
+      if (pdfUrl) {
+        openWhatsAppChat(digitsPhone, `${text}\n\n📄 Bill PDF:\n${pdfUrl}`);
+      } else {
+        const doc = await buildBillPDF();
+        doc.save(fileName);
+        openWhatsAppChat(digitsPhone, text);
+      }
       await persistAfterSend();
       setSentBanner(`WhatsApp opened for ${displayPhone}. Tap Send to share the bill.`);
       setTimeout(() => setSentBanner(''), 14000);
@@ -840,7 +855,7 @@ export default function PotteryShopBilling() {
             )}
             {canSend && isMobileDevice() && (
               <p className="text-xs text-stone-500 mb-2">
-                Opens WhatsApp for the customer number with the PDF bill — tap Send in WhatsApp.
+                Shares the PDF bill as a file in WhatsApp (like a document attachment). Select WhatsApp, pick {displayPhone}, then tap Send.
               </p>
             )}
 
@@ -919,7 +934,7 @@ export default function PotteryShopBilling() {
                   Customer: <strong>{sharePrompt.displayPhone}</strong>
                 </p>
                 <p className="text-sm text-stone-600 mb-4">
-                  Tap below to open WhatsApp for this customer with the bill message.
+                  Tap below to share the PDF bill file in WhatsApp, then choose this customer and tap Send.
                 </p>
               </>
             )}
@@ -940,7 +955,7 @@ export default function PotteryShopBilling() {
                   onClick={() => openWhatsAppChat(digitsPhone, sharePrompt.text || buildWhatsAppMessage())}
                   className="w-full px-4 py-2 rounded-xl bg-stone-100 text-stone-600 font-medium hover:bg-stone-200 transition-colors text-sm"
                 >
-                  Open WhatsApp for {sharePrompt.displayPhone}
+                  Text-only chat for {sharePrompt.displayPhone}
                 </button>
               )}
               <button
