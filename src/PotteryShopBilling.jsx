@@ -166,26 +166,21 @@ const triggerDownload = (file) => {
   }, 300);
 };
 
-// Opens WhatsApp directly to the customer's number
+// Opens WhatsApp directly to the customer's specific number
 const openWhatsAppChat = (phoneDigits, text = '') => {
   const phone = String(phoneDigits).replace(/\D/g, '');
   if (!phone) return;
 
-  const params = new URLSearchParams({ phone });
-  if (text) params.set('text', text);
-
+  const encodedText = encodeURIComponent(text);
   const isMobile = isMobileDevice();
+
   if (isMobile) {
-    window.location.href = `whatsapp://send?${params.toString()}`;
-    setTimeout(() => {
-      if (document.visibilityState === 'visible') {
-        window.open(`https://api.whatsapp.com/send?${params.toString()}`, '_blank');
-      }
-    }, 600);
+    // Universal WhatsApp link: directly opens entered customer number chat on Android / iOS
+    window.location.href = `https://api.whatsapp.com/send?phone=${phone}&text=${encodedText}`;
     return;
   }
 
-  const webUrl = `https://web.whatsapp.com/send?${params.toString()}`;
+  const webUrl = `https://web.whatsapp.com/send?phone=${phone}&text=${encodedText}`;
   window.open(webUrl, '_blank', 'noopener,noreferrer');
 };
 
@@ -654,26 +649,6 @@ export default function PotteryShopBilling() {
         return;
       }
 
-      // Check if Web Share API with files is supported (primarily mobile & modern OS)
-      const canWebShareFiles =
-        typeof navigator !== 'undefined' &&
-        !!navigator.share &&
-        (!navigator.canShare || navigator.canShare({ files: [file] }));
-
-      if (canWebShareFiles && isMobileDevice()) {
-        try {
-          await shareBillPdfToWhatsApp(file, caption);
-          await persistAfterSend();
-          setSentBanner(`✅ WhatsApp opened with bill PDF attached for ${displayPhone}!`);
-          setTimeout(() => setSentBanner(''), 14000);
-          return;
-        } catch (e) {
-          if (e?.name === 'AbortError') return;
-          // if share sheet fails or is cancelled, proceed to fallback
-        }
-      }
-
-      // Desktop & Browser Flow:
       await persistAfterSend();
 
       // 1. Copy clean caption to clipboard
