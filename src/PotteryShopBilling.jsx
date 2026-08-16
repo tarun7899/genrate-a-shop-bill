@@ -147,6 +147,16 @@ const loadJsPDF = () => {
 
 const isMobileDevice = () => /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
 
+const canSharePdfFile = (file) => {
+  if (typeof navigator === 'undefined' || !navigator.share) return false;
+  if (!navigator.canShare) return isMobileDevice();
+  try {
+    return navigator.canShare({ files: [file] });
+  } catch {
+    return false;
+  }
+};
+
 // Must run synchronously inside the click handler — browsers block navigation after await.
 const openWhatsAppChat = (url) => {
   const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
@@ -447,6 +457,30 @@ export default function PotteryShopBilling() {
 
   const displayPhone = `+${countryCode} ${customerPhone.trim()}`;
 
+  const shareBillPdf = async (file, fileName, text) => {
+    const payload = {
+      files: [file],
+      title: fileName.replace('.pdf', ''),
+    };
+    if (text) payload.text = text;
+    await navigator.share(payload);
+  };
+
+  const handleSharePdfPrompt = async () => {
+    if (!sharePrompt?.file) return;
+    try {
+      await shareBillPdf(sharePrompt.file, sharePrompt.fileName, sharePrompt.text);
+      await persistAfterSend();
+      setSharePrompt(null);
+      setSentBanner(`PDF is attached in WhatsApp. Pick chat for ${sharePrompt.displayPhone || displayPhone} and tap Send.`);
+      setTimeout(() => setSentBanner(''), 14000);
+    } catch (e) {
+      if (e?.name === 'AbortError') return;
+      setSentBanner('Could not share the PDF. Use the HTTPS Vercel link on your phone, or download the PDF and attach manually.');
+      setTimeout(() => setSentBanner(''), 10000);
+    }
+  };
+
   const handleSend = async () => {
     if (!canSend) return;
     setPdfBusy(true);
@@ -456,24 +490,44 @@ export default function PotteryShopBilling() {
     const waChatUrl = `https://wa.me/${digitsPhone}`;
     const fileName = `Bill-${displayBillNo.replace('#', '')}.pdf`;
 
-    // Open the customer's WhatsApp chat immediately (must happen before await).
-    if (mobile) {
-      openWhatsAppChat(waChatUrl);
-    }
-
     try {
       const doc = await buildBillPDF();
-      doc.save(fileName);
-      await persistAfterSend();
+      const blob = doc.output('blob');
+      const file = new File([blob], fileName, { type: 'application/pdf' });
+      const text = buildWhatsAppMessage();
+      const secure = typeof window !== 'undefined' && window.isSecureContext;
+      const shareCapable = mobile && secure && canSharePdfFile(file);
 
-      if (mobile) {
-        setSharePrompt({ fileName, displayPhone });
-        setSentBanner(`WhatsApp opened for ${displayPhone}. Attach ${fileName} with 📎 → Document → Send.`);
-      } else {
-        const text = buildWhatsAppMessage();
-        openWhatsAppChat(`${waChatUrl}?text=${encodeURIComponent(text)}`);
-        setSentBanner(`PDF saved as ${fileName}. WhatsApp opened for ${displayPhone} — attach the PDF, then send.`);
+      // Mobile: share PDF file so WhatsApp shows it in the compose box (ready to Send).
+      // wa.me links cannot attach files — only Web Share can put the PDF below the message.
+      if (shareCapable) {
+        try {
+          await shareBillPdf(file, fileName, text);
+          await persistAfterSend();
+          setSentBanner(`PDF is attached in WhatsApp. Select chat for ${displayPhone} and tap Send.`);
+          setTimeout(() => setSentBanner(''), 14000);
+          return;
+        } catch (e) {
+          if (e?.name === 'AbortError') return;
+          // After async PDF build the share sheet may need one more tap.
+          setSharePrompt({ file, fileName, text, displayPhone });
+          return;
+        }
       }
+
+      if (mobile && !secure) {
+        doc.save(fileName);
+        setSharePrompt({ fileName, displayPhone, needsHttps: true });
+        setSentBanner('PDF saved. Open this app via your HTTPS Vercel link to attach PDF directly in WhatsApp.');
+        setTimeout(() => setSentBanner(''), 14000);
+        return;
+      }
+
+      // Desktop: download PDF and open WhatsApp Web for this number.
+      doc.save(fileName);
+      openWhatsAppChat(`${waChatUrl}?text=${encodeURIComponent(text)}`);
+      await persistAfterSend();
+      setSentBanner(`PDF saved as ${fileName}. WhatsApp opened for ${displayPhone} — attach the PDF, then send.`);
       setTimeout(() => setSentBanner(''), 14000);
     } catch (e) {
       setSentBanner('Could not generate the PDF. Check your connection and try again.');
@@ -800,30 +854,51 @@ export default function PotteryShopBilling() {
       {sharePrompt && (
         <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/40 p-4">
           <div className="w-full max-w-sm rounded-2xl bg-white p-5 shadow-xl">
-            <h3 className="font-semibold text-stone-900 text-lg mb-1">Send PDF on WhatsApp</h3>
-            <p className="text-sm text-stone-600 mb-3">
-              WhatsApp is open for <strong>{sharePrompt.displayPhone}</strong>.
-            </p>
-            <ol className="text-sm text-stone-600 mb-4 space-y-2 list-decimal list-inside">
-              <li>PDF saved as <strong>{sharePrompt.fileName}</strong></li>
-              <li>In WhatsApp, tap <strong>📎</strong> → <strong>Document</strong></li>
-              <li>Select <strong>{sharePrompt.fileName}</strong> and tap <strong>Send</strong></li>
-            </ol>
+            <h3 className="font-semibold text-stone-900 text-lg mb-1">PDF bill ready</h3>
+            {sharePrompt.needsHttps ? (
+              <p className="text-sm text-stone-600 mb-4">
+                PDF saved as <strong>{sharePrompt.fileName}</strong>. To show the PDF directly in WhatsApp
+                (attached below the message, ready to Send), open this app using your{' '}
+                <strong>HTTPS Vercel link</strong> — not a local Wi‑Fi address like http://192.168...
+              </p>
+            ) : (
+              <>
+                <p className="text-sm text-stone-600 mb-3">
+                  Customer: <strong>{sharePrompt.displayPhone}</strong>
+                </p>
+                <ol className="text-sm text-stone-600 mb-4 space-y-2 list-decimal list-inside">
+                  <li>Tap <strong>Share PDF on WhatsApp</strong> below</li>
+                  <li>Choose <strong>WhatsApp</strong></li>
+                  <li>Pick the customer chat — the PDF appears attached, just tap <strong>Send</strong></li>
+                </ol>
+              </>
+            )}
             <div className="flex flex-col gap-2">
-              <button
-                type="button"
-                onClick={() => openWhatsAppChat(`https://wa.me/${digitsPhone}`)}
-                className="w-full flex items-center justify-center gap-2 px-4 py-3 rounded-xl bg-green-600 text-white font-semibold hover:bg-green-700 transition-colors"
-              >
-                <MessageCircle className="w-5 h-5" />
-                Open WhatsApp again
-              </button>
+              {!sharePrompt.needsHttps && sharePrompt.file && (
+                <button
+                  type="button"
+                  onClick={handleSharePdfPrompt}
+                  className="w-full flex items-center justify-center gap-2 px-4 py-3 rounded-xl bg-green-600 text-white font-semibold hover:bg-green-700 transition-colors"
+                >
+                  <MessageCircle className="w-5 h-5" />
+                  Share PDF on WhatsApp
+                </button>
+              )}
+              {!sharePrompt.needsHttps && (
+                <button
+                  type="button"
+                  onClick={() => openWhatsAppChat(`https://wa.me/${digitsPhone}`)}
+                  className="w-full px-4 py-2 rounded-xl bg-stone-100 text-stone-600 font-medium hover:bg-stone-200 transition-colors text-sm"
+                >
+                  Open chat for {sharePrompt.displayPhone} only
+                </button>
+              )}
               <button
                 type="button"
                 onClick={() => setSharePrompt(null)}
                 className="w-full px-4 py-2 rounded-xl bg-stone-100 text-stone-600 font-medium hover:bg-stone-200 transition-colors"
               >
-                Done
+                Close
               </button>
             </div>
           </div>
