@@ -9,12 +9,17 @@ import {
   RotateCcw,
   X,
   FileDown,
-  Share2,
   Image as ImageIcon,
   ExternalLink,
   CheckCheck,
   FileText,
   AlertCircle,
+  Users,
+  UserCheck,
+  Contact,
+  Search,
+  Smartphone,
+  Sparkles,
 } from 'lucide-react';
 import { jsPDF } from 'jspdf';
 import html2canvas from 'html2canvas';
@@ -42,6 +47,71 @@ const DEFAULT_SHOP = {
   currency: '₹',
   whatsappAccessToken: '',
   whatsappPhoneNumberId: '',
+};
+
+const isContactPickerSupported = () =>
+  typeof navigator !== 'undefined' && 'contacts' in navigator && 'ContactsManager' in window;
+
+const isMobileDevice = () => {
+  if (typeof navigator === 'undefined') return false;
+  return /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+};
+
+const parseContactPhone = (rawPhone) => {
+  if (!rawPhone) return { countryCode: '91', customerPhone: '' };
+  // Remove non-digit characters
+  const digits = String(rawPhone).replace(/\D/g, '');
+  if (!digits) return { countryCode: '91', customerPhone: '' };
+
+  // Common Indian number parsing (+91 or leading 0)
+  if (digits.startsWith('91') && digits.length === 12) {
+    return { countryCode: '91', customerPhone: digits.slice(2) };
+  }
+  if (digits.startsWith('0') && digits.length === 11) {
+    return { countryCode: '91', customerPhone: digits.slice(1) };
+  }
+  if (digits.length === 10) {
+    return { countryCode: '91', customerPhone: digits };
+  }
+  if (digits.length > 10) {
+    return {
+      countryCode: digits.slice(0, digits.length - 10),
+      customerPhone: digits.slice(-10),
+    };
+  }
+  return { countryCode: '91', customerPhone: digits };
+};
+
+const triggerDownload = (file) => {
+  const url = URL.createObjectURL(file);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = file.name;
+  link.rel = 'noopener';
+  document.body.appendChild(link);
+  link.click();
+  setTimeout(() => {
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  }, 300);
+};
+
+// Opens WhatsApp directly to the customer's specific number
+const openWhatsAppChat = (phoneDigits, text = '') => {
+  const phone = String(phoneDigits).replace(/\D/g, '');
+  if (!phone) return;
+
+  const encodedText = encodeURIComponent(text);
+  const isMobile = isMobileDevice();
+
+  if (isMobile) {
+    // Universal WhatsApp link: directly opens entered customer number chat on Android / iOS
+    window.location.href = `https://api.whatsapp.com/send?phone=${phone}&text=${encodedText}`;
+    return;
+  }
+
+  const webUrl = `https://web.whatsapp.com/send?phone=${phone}&text=${encodedText}`;
+  window.open(webUrl, '_blank', 'noopener,noreferrer');
 };
 
 const BillReceiptPreview = ({
@@ -147,43 +217,6 @@ const BillReceiptPreview = ({
   </div>
 );
 
-const isMobileDevice = () => {
-  if (typeof navigator === 'undefined') return false;
-  return /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
-};
-
-const triggerDownload = (file) => {
-  const url = URL.createObjectURL(file);
-  const link = document.createElement('a');
-  link.href = url;
-  link.download = file.name;
-  link.rel = 'noopener';
-  document.body.appendChild(link);
-  link.click();
-  setTimeout(() => {
-    document.body.removeChild(link);
-    URL.revokeObjectURL(url);
-  }, 300);
-};
-
-// Opens WhatsApp directly to the customer's specific number
-const openWhatsAppChat = (phoneDigits, text = '') => {
-  const phone = String(phoneDigits).replace(/\D/g, '');
-  if (!phone) return;
-
-  const encodedText = encodeURIComponent(text);
-  const isMobile = isMobileDevice();
-
-  if (isMobile) {
-    // Universal WhatsApp link: directly opens entered customer number chat on Android / iOS
-    window.location.href = `https://api.whatsapp.com/send?phone=${phone}&text=${encodedText}`;
-    return;
-  }
-
-  const webUrl = `https://web.whatsapp.com/send?phone=${phone}&text=${encodedText}`;
-  window.open(webUrl, '_blank', 'noopener,noreferrer');
-};
-
 export default function PotteryShopBilling() {
   const [shop, setShop] = useState(DEFAULT_SHOP);
   const [showSettings, setShowSettings] = useState(false);
@@ -205,6 +238,11 @@ export default function PotteryShopBilling() {
   const [billCounter, setBillCounter] = useState(0);
   const [sentBanner, setSentBanner] = useState('');
   const [pdfBusy, setPdfBusy] = useState(false);
+
+  // Customer directory / Saved Contacts State
+  const [savedContacts, setSavedContacts] = useState([]);
+  const [showContactsModal, setShowContactsModal] = useState(false);
+  const [contactSearchQuery, setContactSearchQuery] = useState('');
 
   const pdfCacheRef = useRef({ key: '', file: null, fileName: '', doc: null });
 
@@ -231,6 +269,17 @@ export default function PotteryShopBilling() {
       } catch {
         // no billing history yet
       }
+      try {
+        const cRes = await window.storage.get('customer-contacts');
+        if (mounted && cRes && cRes.value) {
+          const parsedContacts = JSON.parse(cRes.value);
+          if (Array.isArray(parsedContacts)) {
+            setSavedContacts(parsedContacts);
+          }
+        }
+      } catch {
+        // no saved contacts yet
+      }
     })();
     return () => {
       mounted = false;
@@ -246,7 +295,7 @@ export default function PotteryShopBilling() {
     } catch {
       // storage unavailable
     } finally {
-      setSavingShop(false);
+    setSavingShop(false);
     }
   };
 
@@ -267,6 +316,100 @@ export default function PotteryShopBilling() {
     setShowSettings(false);
   };
 
+  const saveCustomerToContacts = async (name, phone, cCode = '91') => {
+    const cleanPhone = String(phone).replace(/\D/g, '');
+    if (!cleanPhone && !name.trim()) return;
+
+    setSavedContacts((prev) => {
+      const filtered = prev.filter(
+        (c) => !(c.phone === cleanPhone && c.countryCode === cCode),
+      );
+      const updated = [
+        {
+          name: name.trim() || 'Customer',
+          phone: cleanPhone,
+          countryCode: cCode,
+          lastBilledAt: Date.now(),
+        },
+        ...filtered,
+      ].slice(0, 100);
+
+      try {
+        window.storage.set('customer-contacts', JSON.stringify(updated));
+      } catch {
+        // storage unavailable
+      }
+      return updated;
+    });
+  };
+
+  const deleteSavedContact = async (phoneToDelete, cCode) => {
+    setSavedContacts((prev) => {
+      const updated = prev.filter(
+        (c) => !(c.phone === phoneToDelete && c.countryCode === cCode),
+      );
+      try {
+        window.storage.set('customer-contacts', JSON.stringify(updated));
+      } catch {
+        // storage unavailable
+      }
+      return updated;
+    });
+  };
+
+  // Device Native Contact Picker Handler (navigator.contacts.select)
+  const handlePickDeviceContact = async () => {
+    if (isContactPickerSupported()) {
+      try {
+        const props = ['name', 'tel'];
+        const opts = { multiple: false };
+        const results = await navigator.contacts.select(props, opts);
+        if (results && results.length > 0) {
+          const selected = results[0];
+          const name = (selected.name && selected.name[0]) || '';
+          const rawTel = (selected.tel && selected.tel[0]) || '';
+
+          if (name) {
+            setCustomerName(name);
+          }
+          if (rawTel) {
+            const parsed = parseContactPhone(rawTel);
+            if (parsed.countryCode) setCountryCode(parsed.countryCode);
+            setCustomerPhone(parsed.customerPhone);
+          }
+
+          if (name || rawTel) {
+            await saveCustomerToContacts(
+              name,
+              rawTel ? parseContactPhone(rawTel).customerPhone : '',
+              rawTel ? parseContactPhone(rawTel).countryCode : '91',
+            );
+          }
+
+          setSentBanner(`✅ Selected contact: ${name || rawTel}`);
+          setTimeout(() => setSentBanner(''), 4000);
+          setShowContactsModal(false);
+          return;
+        }
+      } catch (err) {
+        if (err?.name !== 'AbortError') {
+          console.warn('Device Contact Picker failed or cancelled:', err);
+        }
+      }
+    }
+    // If device contact picker not supported or cancelled, show saved contacts modal
+    setShowContactsModal(true);
+  };
+
+  const handleSelectSavedContact = (contact) => {
+    if (contact.name) setCustomerName(contact.name);
+    if (contact.countryCode) setCountryCode(contact.countryCode);
+    if (contact.phone) setCustomerPhone(contact.phone);
+    setShowContactsModal(false);
+    setSentBanner(`✅ Loaded customer: ${contact.name || contact.phone}`);
+    setTimeout(() => setSentBanner(''), 4000);
+  };
+
   const addItem = () => {
     setItems((prev) => [...prev, { id: nextId, name: '', qty: '1', price: '' }]);
     setNextId((n) => n + 1);
@@ -279,15 +422,15 @@ export default function PotteryShopBilling() {
   const updateItem = (id, field, value) => {
     setItems((prev) =>
       prev.map((it) => {
-        if (it.id !== id) return it;
-        const updated = { ...it, [field]: value };
-        if (field === 'name') {
-          const match = catalog.find((c) => c.name.toLowerCase() === value.trim().toLowerCase());
-          if (match && !it.price) {
-            updated.price = String(match.price);
-          }
+      if (it.id !== id) return it;
+      const updated = { ...it, [field]: value };
+      if (field === 'name') {
+        const match = catalog.find((c) => c.name.toLowerCase() === value.trim().toLowerCase());
+        if (match && !it.price) {
+          updated.price = String(match.price);
         }
-        return updated;
+      }
+      return updated;
       }),
     );
   };
@@ -300,8 +443,8 @@ export default function PotteryShopBilling() {
   const discountNum = Number(discountValue) || 0;
   const discountAmount =
     discountType === 'percent'
-      ? Math.min(subtotal, subtotal * (discountNum / 100))
-      : Math.min(subtotal, discountNum);
+    ? Math.min(subtotal, subtotal * (discountNum / 100))
+    : Math.min(subtotal, discountNum);
 
   const total = Math.max(0, subtotal - discountAmount);
   const currency = shop.currency || '₹';
@@ -309,7 +452,7 @@ export default function PotteryShopBilling() {
   const digitsPhone = (countryCode + customerPhone).replace(/\D/g, '');
   const displayPhone = `+${countryCode} ${customerPhone.trim()}`;
   const phoneValid = customerPhone.replace(/\D/g, '').length >= 7;
-  const canSend = phoneValid && validItems.length > 0;
+  const canSend = validItems.length > 0;
 
   const today = new Date().toLocaleDateString('en-IN', {
     day: '2-digit',
@@ -479,22 +622,32 @@ export default function PotteryShopBilling() {
     return { file, doc, fileName };
   };
 
+  useEffect(() => {
+    if (validItems.length === 0) return undefined;
+    try {
+      getPdfFile();
+    } catch {
+      // PDF pre-cache is best-effort
+    }
+    return undefined;
+  }, [billCacheKey, validItems.length]);
+
   // Upload PDF with local API + direct tmpfiles fallback
   const uploadPdfAndGetUrl = async (file) => {
     try {
-      const pdfBase64 = await new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(String(reader.result).split(',')[1]);
-        reader.onerror = reject;
-        reader.readAsDataURL(file);
-      });
-      const res = await fetch('/api/upload-bill', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ pdfBase64, fileName: file.name }),
-      });
+    const pdfBase64 = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result).split(',')[1]);
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+    const res = await fetch('/api/upload-bill', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pdfBase64, fileName: file.name }),
+    });
       if (res.ok) {
-        const data = await res.json();
+    const data = await res.json();
         if (data?.url) return data.url;
       }
     } catch {
@@ -562,37 +715,6 @@ export default function PotteryShopBilling() {
     return { ok: true };
   };
 
-  const shareBillPdfToWhatsApp = async (file, caption) => {
-    const pdfFile = new File([file], file.name || 'Bill.pdf', {
-      type: 'application/pdf',
-      lastModified: Date.now(),
-    });
-
-    const attempts = [
-      {
-        files: [pdfFile],
-        title: `Bill ${displayBillNo} - ${shop.name.trim() || 'Pottery Shop'}`,
-        text: caption,
-      },
-      { files: [pdfFile], text: caption },
-      { files: [pdfFile], title: `Bill ${displayBillNo}` },
-      { files: [pdfFile] },
-    ];
-
-    let lastError;
-    for (const payload of attempts) {
-      if (navigator.canShare && !navigator.canShare(payload)) continue;
-      try {
-        await navigator.share(payload);
-        return true;
-      } catch (e) {
-        if (e?.name === 'AbortError') throw e;
-        lastError = e;
-      }
-    }
-    throw lastError || new Error('Could not share PDF');
-  };
-
   const persistAfterSend = async () => {
     const nameMap = new Map(catalog.map((c) => [c.name, c.price]));
     validItems.forEach((it) => {
@@ -604,6 +726,7 @@ export default function PotteryShopBilling() {
       .map(([name, price]) => ({ name, price }))
       .slice(-30);
     setCatalog(newCatalog);
+
     try {
       await window.storage.set(
         'billing-data',
@@ -630,43 +753,111 @@ export default function PotteryShopBilling() {
     }
   };
 
-  // Main Send via WhatsApp Flow
-  const handleSend = async () => {
-    if (!canSend) return;
+  const shareBillPdfPicker = async (file, fileName, caption) => {
+    const pdfFile = new File([file], fileName || 'Bill.pdf', {
+      type: 'application/pdf',
+      lastModified: Date.now(),
+    });
+
+    if (typeof navigator === 'undefined' || !navigator.share) {
+      throw new Error('Share not supported');
+    }
+
+    const withCaption = { files: [pdfFile], text: caption };
+    const fileOnly = { files: [pdfFile] };
+    const attempts = caption ? [withCaption, fileOnly] : [fileOnly];
+
+    let lastError;
+    for (const payload of attempts) {
+      if (navigator.canShare && !navigator.canShare(payload)) continue;
+      try {
+        await navigator.share(payload);
+        return;
+      } catch (e) {
+        if (e?.name === 'AbortError') throw e;
+        lastError = e;
+      }
+    }
+    throw lastError || new Error('Could not open share picker');
+  };
+
+  // Generate PDF, then open phone share picker (choose WhatsApp → customer → Send)
+  const handleSendViaWhatsApp = async () => {
+    if (validItems.length === 0) return;
     setPdfBusy(true);
 
     try {
-      const { file, fileName, doc } = getPdfFile();
+      const { file, fileName } = getPdfFile();
       const caption = buildWhatsAppCaption();
 
-      // Check if WhatsApp Cloud API is configured for direct automated sending
+      await shareBillPdfPicker(file, fileName, caption);
+
+      await persistAfterSend();
+      if (customerPhone || customerName) {
+        await saveCustomerToContacts(customerName, customerPhone, countryCode);
+      }
+      setSentBanner(
+        phoneValid
+          ? `Choose WhatsApp, select ${displayPhone}, then tap Send.`
+          : 'Choose WhatsApp, select customer, then tap Send.',
+      );
+      setTimeout(() => setSentBanner(''), 14000);
+    } catch (e) {
+      if (e?.name === 'AbortError') return;
+
+      // Cloud API fallback — auto-sends PDF to entered number when configured
+      if (phoneValid) {
+        try {
+          const { file } = getPdfFile();
+          const caption = buildWhatsAppCaption();
+          const apiResult = await sendWhatsAppBillApi(file, caption);
+          if (apiResult.ok) {
+            await persistAfterSend();
+            await saveCustomerToContacts(customerName, customerPhone, countryCode);
+            openWhatsAppChat(digitsPhone);
+            setSentBanner(`Bill PDF sent to ${displayPhone}. WhatsApp opened.`);
+            setTimeout(() => setSentBanner(''), 14000);
+            return;
+          }
+        } catch {
+          // fall through
+        }
+      }
+
+      setSentBanner('Could not open share picker. Use HTTPS link on your phone and try again.');
+      setTimeout(() => setSentBanner(''), 10000);
+    } finally {
+      setPdfBusy(false);
+    }
+  };
+
+  const handleSharePdfToContacts = handleSendViaWhatsApp;
+
+  // Open WhatsApp chat with entered number (text only — use Send via WhatsApp for PDF)
+  const handleDirectWhatsApp = async () => {
+    if (!phoneValid || validItems.length === 0) return;
+    setPdfBusy(true);
+
+    try {
+      const { file } = getPdfFile();
+      const caption = buildWhatsAppCaption();
+      await persistAfterSend();
+      await saveCustomerToContacts(customerName, customerPhone, countryCode);
+
       const apiResult = await sendWhatsAppBillApi(file, caption);
       if (apiResult.ok) {
-        await persistAfterSend();
         openWhatsAppChat(digitsPhone);
-        setSentBanner(`✅ Bill PDF sent directly to ${displayPhone}!`);
+        setSentBanner(`Bill PDF sent to ${displayPhone}. WhatsApp opened.`);
         setTimeout(() => setSentBanner(''), 14000);
         return;
       }
 
-      await persistAfterSend();
-
-      // 1. Copy clean caption to clipboard
-      try {
-        await navigator.clipboard.writeText(caption);
-      } catch {
-        // clipboard unavailable
-      }
-
-      // 2. Immediately open WhatsApp chat for the entered customer number
       openWhatsAppChat(digitsPhone, caption);
-
-      setSentBanner(`✅ WhatsApp opened for ${displayPhone}!`);
+      setSentBanner(`WhatsApp opened for ${displayPhone}. Use "Send via WhatsApp" to attach PDF.`);
       setTimeout(() => setSentBanner(''), 14000);
-
     } catch (e) {
-      console.error('handleSend error:', e);
-      setSentBanner('Could not open WhatsApp. Please try again.');
+      console.error('handleDirectWhatsApp error:', e);
+      setSentBanner('Could not open WhatsApp.');
       setTimeout(() => setSentBanner(''), 8000);
     } finally {
       setPdfBusy(false);
@@ -679,6 +870,9 @@ export default function PotteryShopBilling() {
     try {
       const { doc, fileName } = getPdfFile();
       downloadPdfFile(doc, fileName);
+      if (customerPhone || customerName) {
+        saveCustomerToContacts(customerName, customerPhone, countryCode);
+      }
     } catch {
       setSentBanner('Could not generate PDF.');
       setTimeout(() => setSentBanner(''), 6000);
@@ -705,6 +899,16 @@ export default function PotteryShopBilling() {
     setSentBanner('');
   };
 
+  const filteredSavedContacts = useMemo(() => {
+    if (!contactSearchQuery.trim()) return savedContacts;
+    const q = contactSearchQuery.toLowerCase().trim();
+    return savedContacts.filter(
+      (c) =>
+        (c.name && c.name.toLowerCase().includes(q)) ||
+        (c.phone && c.phone.includes(q)),
+    );
+  }, [savedContacts, contactSearchQuery]);
+
   return (
     <div className="min-h-screen w-full bg-stone-100 font-sans">
       <div className="max-w-5xl mx-auto p-4 md:p-8">
@@ -725,13 +929,28 @@ export default function PotteryShopBilling() {
               )}
             </div>
           </div>
+          <div className="flex items-center gap-2 self-start">
+            <button
+              onClick={() => setShowContactsModal(true)}
+              className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-white border border-stone-300 text-stone-700 hover:border-teal-700 hover:text-teal-700 transition-colors text-sm font-medium shadow-sm"
+              title="Saved Contacts & Customer History"
+            >
+              <Users className="w-4 h-4 text-teal-700" />
+              <span>Contacts</span>
+              {savedContacts.length > 0 && (
+                <span className="ml-1 px-1.5 py-0.2 bg-teal-100 text-teal-800 text-[11px] font-semibold rounded-full">
+                  {savedContacts.length}
+                </span>
+              )}
+            </button>
           <button
             onClick={() => setShowSettings((s) => !s)}
-            className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-white border border-stone-300 text-stone-600 hover:border-teal-700 hover:text-teal-700 transition-colors text-sm font-medium self-start shadow-sm"
+              className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-white border border-stone-300 text-stone-600 hover:border-teal-700 hover:text-teal-700 transition-colors text-sm font-medium shadow-sm"
           >
             <Settings2 className="w-4 h-4" />
             Shop Info
           </button>
+          </div>
         </div>
 
         {/* Shop Settings Panel */}
@@ -795,7 +1014,7 @@ export default function PotteryShopBilling() {
                   placeholder="₹"
                   className="w-full px-3 py-2 rounded-lg border border-stone-300 focus:outline-none focus:ring-2 focus:ring-teal-400"
                 />
-              </div>
+            </div>
             </div>
 
             {/* Optional WhatsApp Cloud API settings */}
@@ -840,10 +1059,147 @@ export default function PotteryShopBilling() {
           </div>
         )}
 
+        {/* Saved Contacts & Customer History Modal */}
+        {showContactsModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-stone-900/60 backdrop-blur-sm animate-fadeIn">
+            <div className="bg-white rounded-2xl border border-stone-200 shadow-2xl max-w-lg w-full max-h-[85vh] flex flex-col overflow-hidden">
+              {/* Modal Header */}
+              <div className="p-4 border-b border-stone-200 flex items-center justify-between bg-stone-50/80">
+                <div className="flex items-center gap-2.5">
+                  <div className="p-2 rounded-xl bg-teal-100 text-teal-800">
+                    <Contact className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h3 className="font-serif font-bold text-stone-900 text-base">Select Customer</h3>
+                    <p className="text-xs text-stone-500">Pick from contacts or past billing history</p>
+                  </div>
+                </div>
+                <button
+                  onClick={() => setShowContactsModal(false)}
+                  className="text-stone-400 hover:text-stone-700 p-1.5 rounded-lg hover:bg-stone-100 transition-colors"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              {/* Action: Pick from Phone Contacts directly */}
+              <div className="p-4 bg-teal-50/70 border-b border-teal-100 flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-2.5">
+                <div className="flex items-center gap-2 text-teal-900 text-xs font-medium">
+                  <Smartphone className="w-4 h-4 text-teal-700 flex-shrink-0" />
+                  <span>Access contacts from your phone or device</span>
+                </div>
+                <button
+                  onClick={handlePickDeviceContact}
+                  className="flex items-center justify-center gap-1.5 px-3 py-2 bg-teal-700 hover:bg-teal-800 text-white rounded-xl text-xs font-semibold shadow-sm transition-all whitespace-nowrap"
+                >
+                  <Sparkles className="w-3.5 h-3.5" />
+                  Pick from Phone Contacts
+                </button>
+              </div>
+
+              {/* Search Bar */}
+              <div className="p-3 border-b border-stone-200">
+                <div className="relative">
+                  <Search className="w-4 h-4 text-stone-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                  <input
+                    type="text"
+                    value={contactSearchQuery}
+                    onChange={(e) => setContactSearchQuery(e.target.value)}
+                    placeholder="Search by customer name or phone..."
+                    className="w-full pl-9 pr-3 py-2 rounded-xl border border-stone-300 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500 bg-white"
+                  />
+                  {contactSearchQuery && (
+                    <button
+                      onClick={() => setContactSearchQuery('')}
+                      className="absolute right-3 top-1/2 -translate-y-1/2 text-stone-400 hover:text-stone-600"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {/* Contacts List */}
+              <div className="p-3 overflow-y-auto flex-1 divide-y divide-stone-100">
+                {filteredSavedContacts.length === 0 ? (
+                  <div className="py-10 text-center text-stone-400">
+                    <Users className="w-10 h-10 mx-auto text-stone-300 mb-2 stroke-[1.5]" />
+                    <p className="text-sm font-medium text-stone-600">No saved contacts yet</p>
+                    <p className="text-xs text-stone-400 mt-1 max-w-xs mx-auto">
+                      Customers you bill or pick from your phone will automatically appear here for quick access!
+                    </p>
+                  </div>
+                ) : (
+                  filteredSavedContacts.map((c, i) => (
+                    <div
+                      key={`${c.phone}-${i}`}
+                      className="py-2.5 px-2 rounded-xl hover:bg-stone-50 transition-colors flex items-center justify-between gap-3 group"
+                    >
+                      <button
+                        onClick={() => handleSelectSavedContact(c)}
+                        className="flex items-center gap-3 text-left flex-1 min-w-0"
+                      >
+                        <div className="w-9 h-9 rounded-full bg-teal-100 text-teal-800 flex items-center justify-center font-bold text-sm flex-shrink-0">
+                          {c.name ? c.name.charAt(0).toUpperCase() : 'C'}
+                        </div>
+                        <div className="min-w-0">
+                          <p className="text-sm font-semibold text-stone-900 truncate">
+                            {c.name || 'Unnamed Customer'}
+                          </p>
+                          <p className="text-xs text-stone-500">
+                            +{c.countryCode || '91'} {c.phone}
+                          </p>
+                        </div>
+                      </button>
+                      <div className="flex items-center gap-1.5">
+                        <button
+                          onClick={() => handleSelectSavedContact(c)}
+                          className="px-3 py-1.5 bg-teal-50 hover:bg-teal-700 hover:text-white text-teal-800 text-xs font-semibold rounded-lg transition-all"
+                        >
+                          Select
+                        </button>
+                        <button
+                          onClick={() => deleteSavedContact(c.phone, c.countryCode)}
+                          className="p-1.5 text-stone-300 hover:text-red-500 rounded-lg transition-colors"
+                          title="Remove from saved contacts"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+
+              {/* Modal Footer */}
+              <div className="p-3 bg-stone-50 border-t border-stone-200 flex justify-between items-center text-xs text-stone-500">
+                <span>{savedContacts.length} saved contact{savedContacts.length === 1 ? '' : 's'}</span>
+                <button
+                  onClick={() => setShowContactsModal(false)}
+                  className="px-3 py-1.5 text-xs text-stone-600 hover:text-stone-900 font-medium"
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
           {/* Left: Bill Form */}
           <div className="bg-white rounded-2xl border border-stone-200 p-5 shadow-sm">
-            <h2 className="font-serif font-semibold text-stone-900 mb-4 text-lg">New Bill</h2>
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="font-serif font-semibold text-stone-900 text-lg">New Bill</h2>
+              <button
+                type="button"
+                onClick={handlePickDeviceContact}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-teal-50 hover:bg-teal-100 border border-teal-200 text-teal-800 text-xs font-semibold transition-all shadow-sm"
+                title="Pick contact from your phone or address book"
+              >
+                <Contact className="w-3.5 h-3.5 text-teal-700" />
+                <span>Pick from Contacts</span>
+              </button>
+            </div>
 
             {/* Customer Details */}
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-4">
@@ -860,9 +1216,19 @@ export default function PotteryShopBilling() {
                 />
               </div>
               <div>
-                <label className="block text-xs font-medium text-stone-500 mb-1">
-                  WhatsApp Number <span className="text-red-500">*</span>
-                </label>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="text-xs font-medium text-stone-500">
+                    WhatsApp Number
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => setShowContactsModal(true)}
+                    className="text-[11px] text-teal-700 hover:underline font-medium flex items-center gap-0.5"
+                  >
+                    <Users className="w-3 h-3" />
+                    History
+                  </button>
+                </div>
                 <div className="flex gap-1.5">
                   <span className="inline-flex items-center px-2.5 py-2 rounded-lg border border-stone-300 bg-stone-50 text-xs text-stone-600 font-medium select-none">
                     +{countryCode}
@@ -920,25 +1286,25 @@ export default function PotteryShopBilling() {
                       <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-xs text-stone-400 select-none">
                         {currency}
                       </span>
-                      <input
+                    <input
                         type="number"
                         min="0"
                         step="any"
-                        value={it.price}
+                      value={it.price}
                         onChange={(e) => updateItem(it.id, 'price', e.target.value)}
                         placeholder="Price"
                         className="w-full pl-6 pr-2.5 py-2 rounded-lg border border-stone-300 text-sm text-right focus:outline-none focus:ring-2 focus:ring-teal-400"
                       />
                     </div>
                     {items.length > 1 && (
-                      <button
+                    <button
                         type="button"
-                        onClick={() => removeItem(it.id)}
+                      onClick={() => removeItem(it.id)}
                         className="text-stone-400 hover:text-red-500 p-1.5"
                         title="Remove item"
-                      >
-                        <Trash2 className="w-4 h-4" />
-                      </button>
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
                     )}
                   </div>
                 ))}
@@ -960,29 +1326,29 @@ export default function PotteryShopBilling() {
                 <span className="text-xs font-medium text-stone-600">Discount (optional)</span>
                 <div className="flex items-center gap-2">
                   <div className="inline-flex rounded-lg border border-stone-300 bg-white p-0.5 text-xs">
-                    <button
+                <button
                       type="button"
-                      onClick={() => setDiscountType('flat')}
+                  onClick={() => setDiscountType('flat')}
                       className={`px-2 py-1 rounded-md font-medium transition-colors ${
                         discountType === 'flat' ? 'bg-teal-700 text-white' : 'text-stone-600'
                       }`}
-                    >
+                >
                       {currency} Flat
-                    </button>
-                    <button
+                </button>
+                <button
                       type="button"
-                      onClick={() => setDiscountType('percent')}
+                  onClick={() => setDiscountType('percent')}
                       className={`px-2 py-1 rounded-md font-medium transition-colors ${
                         discountType === 'percent' ? 'bg-teal-700 text-white' : 'text-stone-600'
                       }`}
-                    >
+                >
                       % Percent
-                    </button>
-                  </div>
-                  <input
+                </button>
+              </div>
+              <input
                     type="number"
                     min="0"
-                    value={discountValue}
+                value={discountValue}
                     onChange={(e) => setDiscountValue(e.target.value)}
                     placeholder={discountType === 'percent' ? '10%' : '0'}
                     className="w-20 px-2.5 py-1.5 rounded-lg border border-stone-300 text-sm text-right bg-white focus:outline-none focus:ring-2 focus:ring-teal-400"
@@ -1018,49 +1384,67 @@ export default function PotteryShopBilling() {
               </div>
             </div>
 
-            {!phoneValid && customerPhone.length > 0 && (
-              <p className="text-xs text-red-500 mb-2">Enter a valid 10-digit WhatsApp number</p>
-            )}
             {validItems.length === 0 && (
               <p className="text-xs text-stone-400 mb-2">Add at least one item with price</p>
             )}
+            {validItems.length > 0 && isMobileDevice() && (
+              <p className="text-xs text-stone-500 mb-2">
+                Creates the PDF, opens share picker → choose WhatsApp → pick{' '}
+                {phoneValid ? displayPhone : 'customer'} → tap Send.
+              </p>
+            )}
 
-            {/* Action Buttons */}
-            <div className="flex gap-2.5">
+            {/* Action Buttons Toolbar */}
+            <div className="space-y-2">
               <button
                 type="button"
-                onClick={handleSend}
-                disabled={!canSend || pdfBusy}
-                className="flex-1 flex items-center justify-center gap-2 px-4 py-3 rounded-xl bg-green-600 text-white font-semibold hover:bg-green-700 disabled:opacity-40 disabled:cursor-not-allowed transition-all shadow-sm"
+                onClick={handleSendViaWhatsApp}
+                disabled={validItems.length === 0 || pdfBusy}
+                className="w-full flex items-center justify-center gap-2 px-4 py-3.5 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-700 text-white font-semibold hover:from-emerald-700 hover:to-teal-800 disabled:opacity-40 disabled:cursor-not-allowed transition-all shadow-md active:scale-[0.99]"
               >
                 <MessageCircle className="w-5 h-5" />
-                {pdfBusy ? 'Preparing PDF…' : 'Send via WhatsApp'}
+                <span>{pdfBusy ? 'Preparing Bill PDF…' : 'Send via WhatsApp'}</span>
               </button>
 
-              <button
-                type="button"
+              <div className="grid grid-cols-3 gap-2">
+                <button
+                  type="button"
+                  onClick={handleDirectWhatsApp}
+                  disabled={!phoneValid || validItems.length === 0 || pdfBusy}
+                  className="flex items-center justify-center gap-1.5 px-3 py-2.5 rounded-xl bg-green-50 border border-green-200 text-green-800 font-medium hover:bg-green-100 disabled:opacity-40 disabled:cursor-not-allowed transition-colors text-xs"
+                  title="Open WhatsApp chat for entered number (text only)"
+                >
+                  <MessageCircle className="w-4 h-4 text-green-600" />
+                  <span>Open Chat</span>
+                </button>
+
+                {/* Download PDF */}
+                <button
+                  type="button"
                 onClick={handleDownloadPDF}
                 disabled={validItems.length === 0 || pdfBusy}
-                className="flex items-center justify-center gap-1.5 px-4 py-3 rounded-xl bg-stone-100 text-stone-700 font-medium hover:bg-stone-200 disabled:opacity-40 disabled:cursor-not-allowed transition-colors text-sm"
-                title="Download PDF"
+                  className="flex items-center justify-center gap-1.5 px-3 py-2.5 rounded-xl bg-stone-100 text-stone-700 font-medium hover:bg-stone-200 disabled:opacity-40 disabled:cursor-not-allowed transition-colors text-xs"
+                  title="Download PDF"
               >
                 <FileDown className="w-4 h-4" />
-                PDF
+                  <span>Download</span>
               </button>
 
+                {/* Reset / New Bill */}
               <button
-                type="button"
+                  type="button"
                 onClick={handleNewBill}
-                className="flex items-center justify-center gap-1.5 px-4 py-3 rounded-xl bg-stone-100 text-stone-700 font-medium hover:bg-stone-200 transition-colors text-sm"
-                title="New Bill"
+                  className="flex items-center justify-center gap-1.5 px-3 py-2.5 rounded-xl bg-stone-100 text-stone-700 font-medium hover:bg-stone-200 transition-colors text-xs"
+                  title="New Bill"
               >
                 <RotateCcw className="w-4 h-4" />
-                New
+                  <span>New Bill</span>
               </button>
+              </div>
             </div>
 
             {sentBanner && (
-              <div className="mt-3 px-3.5 py-2.5 rounded-xl bg-teal-50 border border-teal-200 text-teal-900 text-xs font-medium flex items-center gap-2">
+              <div className="mt-3 px-3.5 py-2.5 rounded-xl bg-teal-50 border border-teal-200 text-teal-900 text-xs font-medium flex items-center gap-2 animate-fadeIn">
                 <CheckCheck className="w-4 h-4 text-teal-600 flex-shrink-0" />
                 <span>{sentBanner}</span>
               </div>
@@ -1069,9 +1453,14 @@ export default function PotteryShopBilling() {
 
           {/* Right: Bill Preview */}
           <div className="bg-white rounded-2xl border border-stone-200 p-5 shadow-sm">
-            <div className="mb-3">
-              <h2 className="font-serif font-semibold text-stone-900 text-lg">Bill Preview</h2>
-              <p className="text-xs text-stone-400">Matches the exact PDF bill attachment</p>
+            <div className="mb-3 flex items-center justify-between">
+              <div>
+                <h2 className="font-serif font-semibold text-stone-900 text-lg">Bill Preview</h2>
+                <p className="text-xs text-stone-400">Exact layout that generates in the PDF attachment</p>
+              </div>
+              <span className="px-2.5 py-1 rounded-full bg-stone-100 text-stone-600 text-xs font-semibold">
+                {displayBillNo}
+              </span>
             </div>
             <BillReceiptPreview
               shop={shop}
@@ -1086,7 +1475,6 @@ export default function PotteryShopBilling() {
           </div>
         </div>
       </div>
-
     </div>
   );
 }
