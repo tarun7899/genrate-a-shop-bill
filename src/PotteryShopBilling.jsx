@@ -602,10 +602,42 @@ export default function PotteryShopBilling() {
     doc.text(pdfMoney(total), pageWidth - marginX, y, { align: 'right' });
     y += 34;
 
+    // Digital signature seal (text-based stamp)
+    // Note: jsPDF needs an image as base64/dataURI for exact seal rendering.
+    // If you want exact PNG stamp, tell me and we can embed it as base64 in `src`.
+    const sealW = 250;
+    const sealH = 58;
+    const sealX = pageWidth / 2 - sealW / 2;
+    const sealTopY = y - 8;
+
+    doc.setDrawColor(170, 0, 0);
+    doc.setLineWidth(1);
+    doc.rect(sealX, sealTopY, sealW, sealH);
+
+    const sealCX = sealX + sealW / 2;
+
+    // Shadow (for a stamped feel)
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(12);
+    doc.setTextColor(30, 30, 30);
+    doc.text('SK POTTERY EMPORIUM', sealCX + 1, sealTopY + 18 + 1, { align: 'center' });
+    doc.setFontSize(10);
+    doc.text('28th Cross, Varthur,', sealCX + 1, sealTopY + 32 + 1, { align: 'center' });
+    doc.text('Bangalore - 560 087.', sealCX + 1, sealTopY + 46 + 1, { align: 'center' });
+
+    // Main red stamp text
+    doc.setTextColor(185, 0, 0);
+    doc.setFontSize(12);
+    doc.text('SK POTTERY EMPORIUM', sealCX, sealTopY + 18, { align: 'center' });
+    doc.setFontSize(10);
+    doc.text('28th Cross, Varthur,', sealCX, sealTopY + 32, { align: 'center' });
+    doc.text('Bangalore - 560 087.', sealCX, sealTopY + 46, { align: 'center' });
+
+    // Thank you line below stamp
     doc.setFont('helvetica', 'italic');
     doc.setFontSize(10);
     doc.setTextColor(140, 140, 140);
-    doc.text('Thank you for shopping with us!', pageWidth / 2, y, { align: 'center' });
+    doc.text('Thank you for shopping with us!', pageWidth / 2, sealTopY + sealH + 14, { align: 'center' });
 
     return doc;
   };
